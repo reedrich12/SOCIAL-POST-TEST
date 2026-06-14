@@ -1,0 +1,6 @@
+{
+  "name": "DockTok Orchestrator",
+  "description": "Video orchestrator dashboard linking Cloudflare R2, ffmpeg, OpenAI, and Zernio for IG/TikTok publishing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
