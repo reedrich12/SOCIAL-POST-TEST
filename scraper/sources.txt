@@ -1,0 +1,5 @@
+# One audio/video source URL per line (yt-dlp source mode).
+# Lines starting with # are ignored. Only add content you have the rights to use.
+# Examples (replace with your own):
+# https://www.youtube.com/watch?v=XXXXXXXXXXX
+# https://soundcloud.com/artist/track

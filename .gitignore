@@ -6,3 +6,16 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Local SQLite database (created at runtime)
+orchestrator.db
+orchestrator.db-shm
+orchestrator.db-wal
+
+# Music library contents (don't commit audio; keep the README)
+assets/music/*
+!assets/music/README.md
+
+# Python scraper local env
+scraper/.venv/
+scraper/__pycache__/

@@ -6,6 +6,7 @@ type Job = {
   asset_id: string;
   status: string;
   caption: string | null;
+  result_url: string | null;
   error_message: string | null;
   created_at: string;
   updated_at: string;
@@ -15,6 +16,8 @@ export default function App() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(false);
   const [assetIdInput, setAssetIdInput] = useState('');
+  const [dryRun, setDryRun] = useState(true);
+  const [vertical, setVertical] = useState(true);
 
   const fetchJobs = async () => {
     try {
@@ -42,7 +45,7 @@ export default function App() {
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ assetId: assetIdInput })
+        body: JSON.stringify({ assetId: assetIdInput, dryRun, vertical })
       });
       setAssetIdInput('');
       fetchJobs();
@@ -55,6 +58,7 @@ export default function App() {
   const getStatusIcon = (status: string) => {
     switch (status) {
       case 'completed': return <CheckCircle className="w-4 h-4 text-emerald-400" />;
+      case 'dry_run_complete': return <CheckCircle className="w-4 h-4 text-amber-400" />;
       case 'error': return <XCircle className="w-4 h-4 text-rose-400" />;
       case 'pending': return <Clock className="w-4 h-4 text-slate-400" />;
       default: return <RefreshCw className="w-4 h-4 text-cyan-400 animate-spin" />;
@@ -119,6 +123,26 @@ export default function App() {
                   />
                 </div>
                 
+                <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={vertical}
+                    onChange={(e) => setVertical(e.target.checked)}
+                    className="w-4 h-4 rounded accent-cyan-500"
+                  />
+                  <span>Vertical 9:16 <span className="text-slate-500">(Reel / TikTok format)</span></span>
+                </label>
+
+                <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={dryRun}
+                    onChange={(e) => setDryRun(e.target.checked)}
+                    className="w-4 h-4 rounded accent-cyan-500"
+                  />
+                  <span>Dry run <span className="text-slate-500">(process &amp; preview, skip publishing)</span></span>
+                </label>
+
                 <button
                   type="submit"
                   disabled={loading || !assetIdInput}
@@ -200,6 +224,18 @@ export default function App() {
                           <div className="mt-1 p-3 rounded-xl bg-white/5 border border-white/5">
                             <p className="text-sm text-slate-300"><span className="text-slate-500 font-mono text-xs uppercase tracking-widest mr-2">Caption:</span> {job.caption}</p>
                           </div>
+                        )}
+
+                        {job.result_url && (
+                          <a
+                            href={job.result_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="mt-1 p-3 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center gap-2 hover:bg-cyan-500/20 transition-colors"
+                          >
+                            <Video className="w-4 h-4 text-cyan-300 flex-shrink-0" />
+                            <span className="text-sm text-cyan-200 truncate">Processed video</span>
+                          </a>
                         )}
                         
                         {job.error_message && (
