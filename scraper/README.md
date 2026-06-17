@@ -30,16 +30,25 @@ python3 fetch_trending_audio.py
 ```
 Each URL's audio is extracted to mp3 and uploaded to the music prefix.
 
-### `rapidapi` (automated trending discovery — integration point)
-For hands-off "grab the top trending sounds" automation. Set:
+### `rapidapi` (automated trending discovery)
+Hands-off "grab the top trending sounds" automation via the **"Tiktok Scraper"**
+provider by **tikwm** on RapidAPI (free Basic plan: 300 req/month — a weekly run
+uses ~4). Configure in `.env.local`:
 ```bash
-export SCRAPER_SOURCE=rapidapi
-export RAPIDAPI_KEY=...           # your RapidAPI key
-export RAPIDAPI_HOST=...          # e.g. tiktok-scraper7.p.rapidapi.com
-export RAPIDAPI_TRENDING_URL=...  # the provider's "trending sounds" endpoint
+SCRAPER_SOURCE="rapidapi"
+RAPIDAPI_KEY="..."                                                  # keep only in .env.local
+RAPIDAPI_HOST="tiktok-scraper7.p.rapidapi.com"
+RAPIDAPI_TRENDING_URL="https://tiktok-scraper7.p.rapidapi.com/feed/list?region=us&count=40"
 ```
-Then map the provider's JSON response to `(name, audio_url)` pairs in
-`fetch_via_rapidapi()` (marked `TODO`) — the exact shape varies per provider.
+Then run `python3 fetch_trending_audio.py`.
+
+How it works: tikwm's dedicated *Get Trending Sound* endpoint is **deprecated**, so
+we pull the live **For-You-Page feed** (`/feed/list`) instead. Every FYP video
+carries a `music_info` object with a playable audio URL (`data[].music_info.play`,
+fallback `data[].music`); the scraper extracts those sounds, **dedupes by music id**,
+and ranks by the video's `play_count` (most-trending first). Request more videos
+than `SCRAPER_MAX_TRACKS` (the default URL uses `count=40`) since multiple videos
+can share one sound.
 
 ## Config
 

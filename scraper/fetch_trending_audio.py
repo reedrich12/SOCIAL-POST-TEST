@@ -46,6 +46,21 @@ MAX_TRACKS = int(os.environ.get("SCRAPER_MAX_TRACKS", "50"))
 SOURCE = os.environ.get("SCRAPER_SOURCE", "ytdlp").lower()
 AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".wav", ".ogg", ".flac"}
 
+# Map Content-Type -> file extension (for downloads) and extension -> Content-Type
+# (for R2 uploads). CDN audio URLs are often extension-less, so we derive from
+# the response Content-Type when present.
+CT_TO_EXT = {
+    "audio/mpeg": ".mp3", "audio/mp3": ".mp3",
+    "audio/mp4": ".m4a", "audio/x-m4a": ".m4a",
+    "audio/aac": ".aac",
+    "audio/ogg": ".ogg",
+    "audio/wav": ".wav", "audio/x-wav": ".wav",
+}
+EXT_TO_CT = {
+    ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".aac": "audio/aac",
+    ".ogg": "audio/ogg", ".wav": "audio/wav", ".flac": "audio/flac",
+}
+
 
 def r2_client():
     return boto3.client(
@@ -78,31 +93,35 @@ def fetch_via_ytdlp(out_dir: Path) -> list[Path]:
         return []
 
     print(f"yt-dlp: extracting audio from {len(urls)} source(s)...")
-    # Requires yt-dlp + ffmpeg on PATH (see requirements.txt / README).
-    subprocess.run(
-        [
-            "yt-dlp",
-            "--extract-audio",
-            "--audio-format", "mp3",
-            "--audio-quality", "0",
-            "--no-playlist",
-            "-o", str(out_dir / "%(title).80s.%(ext)s"),
-            *urls,
-        ],
-        check=False,
-    )
+    # Prefer the yt-dlp installed alongside this interpreter (venv), else PATH.
+    ytdlp = Path(sys.executable).parent / "yt-dlp"
+    cmd = [
+        str(ytdlp) if ytdlp.exists() else "yt-dlp",
+        "--extract-audio",
+        "--audio-format", "mp3",
+        "--audio-quality", "0",
+        "--no-playlist",
+        "-o", str(out_dir / "%(title).80s.%(ext)s"),
+    ]
+    # mp3 conversion needs ffmpeg; point at a specific binary if not on PATH.
+    ffmpeg_location = os.environ.get("FFMPEG_LOCATION")
+    if ffmpeg_location:
+        cmd += ["--ffmpeg-location", ffmpeg_location]
+    cmd += urls
+    subprocess.run(cmd, check=False)
     return [p for p in out_dir.iterdir() if p.suffix.lower() in AUDIO_EXTS]
 
 
 # --- Source: RapidAPI (trending discovery) ------------------------------------
 def fetch_via_rapidapi(out_dir: Path) -> list[Path]:
     """
-    Discover trending sounds via a RapidAPI TikTok/Reels endpoint, then download.
+    Discover trending sounds via the tikwm "Tiktok Scraper" RapidAPI provider.
 
-    INTEGRATION POINT — set:
-      RAPIDAPI_KEY, RAPIDAPI_HOST, RAPIDAPI_TRENDING_URL
-    and map the response to a list of (name, audio_url) below. The exact JSON
-    shape depends on the provider you choose, hence the TODO.
+    Uses the FYP feed (GET /feed/list) — tikwm's dedicated trending-sound endpoint
+    is deprecated, but every FYP video carries a music_info object with a playable
+    audio URL, so we extract + dedupe the sounds from the trending feed.
+
+    Set RAPIDAPI_KEY, RAPIDAPI_HOST, RAPIDAPI_TRENDING_URL (see .env.example).
     """
     api_key = os.environ.get("RAPIDAPI_KEY")
     api_host = os.environ.get("RAPIDAPI_HOST")
@@ -114,43 +133,92 @@ def fetch_via_rapidapi(out_dir: Path) -> list[Path]:
         )
         return []
 
+    # The FYP feed can return duplicate sounds, so pull more videos than we need.
+    if "count=" not in trending_url:
+        sep = "&" if "?" in trending_url else "?"
+        trending_url = f"{trending_url}{sep}count={max(MAX_TRACKS * 2, 20)}"
+
     resp = requests.get(
         trending_url,
         headers={"X-RapidAPI-Key": api_key, "X-RapidAPI-Host": api_host},
         timeout=30,
     )
+    if resp.status_code >= 500:
+        print(
+            f"rapidapi (tikwm): provider error {resp.status_code}; retry later.",
+            file=sys.stderr,
+        )
+        return []
     resp.raise_for_status()
     data = resp.json()
 
-    # TODO: map your provider's response to (name, direct_audio_url) pairs.
-    # Example shape — adjust the keys to match your endpoint:
-    #   tracks = [(item["title"], item["play_url"]) for item in data["sounds"]]
-    tracks = [
-        (t.get("title") or t.get("id") or f"track_{i}", t.get("play_url") or t.get("url"))
-        for i, t in enumerate(data.get("sounds", data.get("data", [])))
-    ][:MAX_TRACKS]
+    # --- map tikwm /feed/list response -> [(name, audio_url)] ---
+    if isinstance(data, dict) and data.get("code") not in (0, None):
+        print(f"rapidapi (tikwm): API returned error code={data.get('code')} "
+              f"msg={data.get('msg')!r}", file=sys.stderr)
+        return []
+
+    videos = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(videos, list):
+        print(f"rapidapi (tikwm): unexpected response shape; top-level keys: "
+              f"{list(data) if isinstance(data, dict) else type(data)}", file=sys.stderr)
+        return []
+
+    # Dedupe sounds by music id, keep the appearance with the highest play_count.
+    by_id: dict[str, dict] = {}
+    for v in videos:
+        if not isinstance(v, dict):
+            continue
+        mi = v.get("music_info") or {}
+        url = mi.get("play") or v.get("music")
+        if not url:
+            continue
+        mid = str(mi.get("id") or url)
+        title = mi.get("title") or v.get("title") or mid
+        author = mi.get("author") or ""
+        name = f"{title} - {author}".strip(" -") or mid
+        score = v.get("play_count") or 0
+        prev = by_id.get(mid)
+        if prev is None or score > prev["score"]:
+            by_id[mid] = {"name": name, "url": url, "score": score}
+
+    ranked = sorted(by_id.values(), key=lambda x: x["score"], reverse=True)
+    tracks = [(t["name"], t["url"]) for t in ranked][:MAX_TRACKS]
+
+    if not tracks:
+        print("rapidapi (tikwm): feed parsed but no audio URLs found.", file=sys.stderr)
 
     downloaded: list[Path] = []
     for name, url in tracks:
         if not url:
             continue
-        dest = out_dir / f"{_slug(name)}.mp3"
-        with requests.get(url, stream=True, timeout=60) as r:
-            r.raise_for_status()
-            with open(dest, "wb") as fh:
-                for chunk in r.iter_content(8192):
-                    fh.write(chunk)
-        downloaded.append(dest)
+        try:
+            with requests.get(url, stream=True, timeout=60) as r:
+                r.raise_for_status()
+                # Prefer extension from Content-Type; fall back to URL ext, else .mp3.
+                ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                ext = CT_TO_EXT.get(ctype)
+                if not ext:
+                    url_ext = Path(url.split("?")[0]).suffix.lower()
+                    ext = url_ext if url_ext in AUDIO_EXTS else ".mp3"
+                dest = out_dir / f"{_slug(name)}{ext}"
+                with open(dest, "wb") as fh:
+                    for chunk in r.iter_content(8192):
+                        fh.write(chunk)
+            downloaded.append(dest)
+        except Exception as e:  # one bad CDN URL shouldn't abort the run
+            print(f"  skip '{name}': {e}", file=sys.stderr)
     return downloaded
 
 
 def upload_tracks(s3, paths: list[Path]) -> int:
     count = 0
     for p in paths:
-        key = f"{MUSIC_PREFIX}{_slug(p.stem)}{p.suffix.lower()}"
+        ext = p.suffix.lower()
+        key = f"{MUSIC_PREFIX}{_slug(p.stem)}{ext}"
         s3.upload_file(
             str(p), R2_BUCKET, key,
-            ExtraArgs={"ContentType": "audio/mpeg"},
+            ExtraArgs={"ContentType": EXT_TO_CT.get(ext, "audio/mpeg")},
         )
         print(f"  uploaded -> {key}")
         count += 1
