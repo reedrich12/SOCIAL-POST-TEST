@@ -33,17 +33,22 @@ db.exec(`
     asset_id TEXT NOT NULL,
     caption TEXT,
     result_url TEXT,
+    zernio_post_id TEXT,
+    published_urls TEXT,
     error_message TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 `);
 
-// Idempotent migration: add result_url to pre-existing tables that lack it.
+// Idempotent migrations: add columns pre-existing tables may lack.
 const jobColumns = db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[];
-if (!jobColumns.some((c) => c.name === 'result_url')) {
-  db.exec('ALTER TABLE jobs ADD COLUMN result_url TEXT');
-}
+const ensureColumn = (name: string, ddl: string) => {
+  if (!jobColumns.some((c) => c.name === name)) db.exec(`ALTER TABLE jobs ADD COLUMN ${ddl}`);
+};
+ensureColumn('result_url', 'result_url TEXT');
+ensureColumn('zernio_post_id', 'zernio_post_id TEXT'); // Zernio post _id once published
+ensureColumn('published_urls', 'published_urls TEXT'); // JSON [{platform, url}] live links
 
 // --- 2. S3 / R2 Configuration ---
 const getS3Client = () => {
@@ -247,7 +252,10 @@ async function resolveZernioPlatforms(headers: Record<string, string>): Promise<
 //   3. PUT the file to uploadUrl (no auth)
 //   4. POST /posts with mediaItems[].url = publicUrl and publishNow: true
 // Returns the created post id. Throws on any non-2xx.
-async function publishViaZernio(videoFilePath: string, caption: string): Promise<string> {
+async function publishViaZernio(
+  videoFilePath: string,
+  caption: string,
+): Promise<{ postId: string; liveUrls: { platform: string; url: string }[] }> {
   const apiKey = process.env.ZERNIO_API_KEY as string;
   const authHeaders = { Authorization: `Bearer ${apiKey}` };
   const jsonHeaders = { ...authHeaders, 'Content-Type': 'application/json' };
@@ -303,12 +311,43 @@ async function publishViaZernio(videoFilePath: string, caption: string): Promise
   }
   const postJson: any = await postRes.json();
   const post = postJson?.post ?? {};
-  // Log the live per-platform URLs when published immediately.
-  const liveUrls = (post.platforms || [])
-    .map((p: any) => p.platformPostUrl)
-    .filter(Boolean);
-  if (liveUrls.length) console.log(`Zernio published ${post._id}:`, liveUrls.join(', '));
-  return post._id || '';
+  return { postId: post._id || '', liveUrls: extractLiveUrls(post) };
+}
+
+// Pull [{platform, url}] from a Zernio post object (only platforms with a URL).
+function extractLiveUrls(post: any): { platform: string; url: string }[] {
+  return (post?.platforms || [])
+    .filter((p: any) => p.platformPostUrl)
+    .map((p: any) => ({ platform: p.platform, url: p.platformPostUrl }));
+}
+
+// After publish, TikTok/Instagram finish asynchronously, so the live post URLs
+// aren't in the create response. Poll GET /posts/{id} in the background and write
+// the links to the job row as they appear (the dashboard polls and picks them up).
+async function pollPublishedUrls(postId: string, jobId: string): Promise<void> {
+  const headers = { Authorization: `Bearer ${process.env.ZERNIO_API_KEY as string}` };
+  for (let i = 0; i < 10; i++) {
+    await new Promise((r) => setTimeout(r, 15000));
+    try {
+      const res = await fetch(`${ZERNIO_BASE_URL}/posts/${postId}`, { headers });
+      if (!res.ok) continue;
+      const data: any = await res.json();
+      const post = data.post ?? data;
+      const urls = extractLiveUrls(post);
+      if (urls.length) {
+        db.prepare('UPDATE jobs SET published_urls = ? WHERE id = ?').run(
+          JSON.stringify(urls),
+          jobId,
+        );
+      }
+      const platforms = post?.platforms || [];
+      if (post?.status === 'published' || platforms.every((p: any) => ['published', 'failed'].includes(p.status))) {
+        return;
+      }
+    } catch {
+      // transient; keep polling
+    }
+  }
 }
 
 // --- Express App Setup ---
@@ -430,7 +469,14 @@ async function processJob(jobId: string, assetId: string, dryRun = false, vertic
       return;
     }
     if (process.env.ZERNIO_API_KEY && haveProcessedFile) {
-      await publishViaZernio(outputPath, finalCaption);
+      const { postId, liveUrls } = await publishViaZernio(outputPath, finalCaption);
+      if (postId) db.prepare('UPDATE jobs SET zernio_post_id = ? WHERE id = ?').run(postId, jobId);
+      if (liveUrls.length) {
+        db.prepare('UPDATE jobs SET published_urls = ? WHERE id = ?').run(JSON.stringify(liveUrls), jobId);
+      } else if (postId) {
+        // Live URLs land asynchronously; fill them in via background poll.
+        void pollPublishedUrls(postId, jobId);
+      }
     } else {
       await wait(1000); // mock (no key, or nothing to publish)
     }

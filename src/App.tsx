@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Activity, Play, Plus, RefreshCw, UploadCloud, Video, Music, Image as ImageIcon, Send, Clock, CheckCircle, XCircle, AlertCircle } from 'lucide-react';
+import { Activity, Play, Plus, RefreshCw, UploadCloud, Video, Music, Image as ImageIcon, Send, Clock, CheckCircle, XCircle, AlertCircle, ExternalLink } from 'lucide-react';
 
 type Job = {
   id: string;
@@ -7,6 +7,8 @@ type Job = {
   status: string;
   caption: string | null;
   result_url: string | null;
+  zernio_post_id: string | null;
+  published_urls: string | null; // JSON string: [{ platform, url }]
   error_message: string | null;
   created_at: string;
   updated_at: string;
@@ -53,6 +55,16 @@ export default function App() {
       console.error(err);
     }
     setLoading(false);
+  };
+
+  const parseLiveLinks = (raw: string | null): { platform: string; url: string }[] => {
+    if (!raw) return [];
+    try {
+      const v = JSON.parse(raw);
+      return Array.isArray(v) ? v.filter((x) => x && x.url) : [];
+    } catch {
+      return [];
+    }
   };
 
   const getStatusIcon = (status: string) => {
@@ -215,7 +227,7 @@ export default function App() {
                           <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white/5 border border-white/10 backdrop-blur-md shadow-sm">
                             {getStatusIcon(job.status)}
                             <span className="text-xs font-semibold uppercase tracking-widest text-slate-300">
-                              {job.status.replace('_', ' ')}
+                              {job.status.replaceAll('_', ' ')}
                             </span>
                           </div>
                         </div>
@@ -225,6 +237,30 @@ export default function App() {
                             <p className="text-sm text-slate-300"><span className="text-slate-500 font-mono text-xs uppercase tracking-widest mr-2">Caption:</span> {job.caption}</p>
                           </div>
                         )}
+
+                        {(() => {
+                          const links = parseLiveLinks(job.published_urls);
+                          if (links.length === 0) return null;
+                          return (
+                            <div className="mt-1 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex flex-col gap-2">
+                              <span className="text-xs text-emerald-400/80 font-mono uppercase tracking-widest">Published</span>
+                              <div className="flex flex-wrap gap-2">
+                                {links.map((l) => (
+                                  <a
+                                    key={l.platform}
+                                    href={l.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 border border-emerald-500/25 text-sm text-emerald-200 hover:bg-emerald-500/25 transition-colors capitalize"
+                                  >
+                                    <ExternalLink className="w-3.5 h-3.5" />
+                                    {l.platform}
+                                  </a>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })()}
 
                         {job.result_url && (
                           <a
